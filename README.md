@@ -82,3 +82,5 @@ If data or usage grows a lot beyond this, different parts of the system scale in
 - **MongoDB (writes)**: sharding is built in natively, splitting data into chunks and
   distributing them automatically, more straightforward here than it would be with a
   relational database
+
+![Architecture diagram](lottery-search-design.svg)
