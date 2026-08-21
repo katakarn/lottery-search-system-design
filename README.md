@@ -1,5 +1,36 @@
 # Lottery Search System
 
+## Deployment
+
+Search stays read-only against bitmaps; claiming a ticket is the only path that touches Kafka and
+MongoDB.
+
+```mermaid
+flowchart TB
+    Client(["Client"])
+
+    subgraph App["App instances (stateless)"]
+        API["Search API<br/>positional + availability bitmaps"]
+    end
+
+    Kafka[("Kafka<br/>claim requests, partitioned by number")]
+    Consumer["Consumer<br/>claims one ticket per candidate number"]
+    Sweep["Background sweep<br/>expires TTL reservations"]
+
+    Redis[("Redis<br/>shared bitmaps (optional)<br/>available instance IDs per number")]
+    Mongo[("MongoDB<br/>ticket documents<br/>source of truth")]
+
+    Client -->|"search pattern"| API
+    API -->|"AND bitmaps"| Redis
+    Client -->|"claim number"| API
+    API -->|"publish claim request"| Kafka
+    Kafka --> Consumer
+    Consumer -->|"grab candidate instance"| Redis
+    Consumer -->|"single-doc update<br/>available to reserved"| Mongo
+    Sweep -->|"reserved to available on TTL expiry"| Mongo
+    Sweep -->|"flip bit back on"| Redis
+```
+
 ## 1. Search & Indexing Strategy
 
 A ticket number is six digits, so there are only 1,000,000 possible numbers, 000000 through
@@ -27,6 +58,20 @@ result = availability_bitmap
 Only the fixed positions contribute a term; wildcards just get skipped, and none of it touches
 the 10-million-record ticket collection.
 
+```mermaid
+flowchart LR
+    P0["position-0 = '1'<br/>bitmap"]
+    P5["position-5 = '5'<br/>bitmap"]
+    AVAIL["availability<br/>bitmap"]
+    AND(("AND"))
+    RESULT["matching &amp; available<br/>numbers"]
+
+    P0 --> AND
+    P5 --> AND
+    AVAIL --> AND
+    AND --> RESULT
+```
+
 ## 2. Concurrency: Preventing Duplicate Simultaneous Allocation
 
 Requests get published to Kafka first, partitioned by ticket `number`, so everything for a given
@@ -51,6 +96,36 @@ either went through or it didn't.
 Reservations carry a TTL, five minutes say, for the window while someone's completing a purchase.
 A background sweep runs periodically, flips any reservation older than the TTL back to
 available, and flips the number back on in the availability bitmap.
+
+```mermaid
+sequenceDiagram
+    participant A as User A
+    participant B as User B
+    participant K as Kafka (partition = number)
+    participant C as Consumer
+    participant M as MongoDB
+
+    A->>K: claim number N
+    B->>K: claim number N
+    Note over K: same partition, processed in arrival order
+    K->>C: request A
+    C->>M: update one ticket, number=N, available to reserved
+    M-->>C: matched ticket T1
+    C-->>A: reserved T1
+    K->>C: request B
+    C->>M: update one ticket, number=N, available to reserved
+    M-->>C: matched ticket T2 (or none left)
+    C-->>B: reserved T2 (or sold out)
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> available
+    available --> reserved: consumer claims (atomic update)
+    reserved --> sold: purchase completes
+    reserved --> available: TTL expires (background sweep)
+    sold --> [*]
+```
 
 ## 3. Storage Technology Choice
 
@@ -82,5 +157,3 @@ If data or usage grows a lot beyond this, different parts of the system scale in
 - **MongoDB (writes)**: sharding is built in natively, splitting data into chunks and
   distributing them automatically, more straightforward here than it would be with a
   relational database
-
-![Architecture diagram](lottery-search-design.svg)
