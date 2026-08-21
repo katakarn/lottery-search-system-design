@@ -2,33 +2,35 @@
 
 ## Deployment
 
-Search stays read-only against bitmaps; claiming a ticket is the only path that touches Kafka and
-MongoDB.
+Search reads local in-memory bitmaps only, no network hop. Claiming a ticket is the only path
+that touches Kafka and MongoDB; bit flips then propagate back to every instance over Redis
+Pub/Sub.
 
 ```mermaid
 flowchart TB
     Client(["Client"])
 
     subgraph App["App instances (stateless)"]
-        API["Search API<br/>positional + availability bitmaps"]
+        API["Search API<br/>local in-memory bitmaps<br/>AND computed locally"]
     end
 
-    Kafka[("Kafka<br/>claim requests, partitioned by number")]
-    Consumer["Consumer<br/>claims one ticket per candidate number"]
+    Kafka[("Kafka<br/>partitioned by number")]
+    Consumer["Consumer<br/>claims one ticket per candidate"]
     Sweep["Background sweep<br/>expires TTL reservations"]
+    Redis[("Redis<br/>available instance IDs")]
+    PubSub{{"Redis Pub/Sub<br/>bit-flip broadcast"}}
+    Mongo[("MongoDB<br/>source of truth")]
 
-    Redis[("Redis<br/>shared bitmaps (optional)<br/>available instance IDs per number")]
-    Mongo[("MongoDB<br/>ticket documents<br/>source of truth")]
-
-    Client -->|"search pattern"| API
-    API -->|"AND bitmaps"| Redis
+    Client -->|"search pattern (stays local)"| API
     Client -->|"claim number"| API
-    API -->|"publish claim request"| Kafka
+    API -->|"publish"| Kafka
     Kafka --> Consumer
-    Consumer -->|"grab candidate instance"| Redis
-    Consumer -->|"single-doc update<br/>available to reserved"| Mongo
-    Sweep -->|"reserved to available on TTL expiry"| Mongo
-    Sweep -->|"flip bit back on"| Redis
+    Consumer -->|"grab candidate"| Redis
+    Consumer -->|"claim"| Mongo
+    Consumer -->|"bit-flip"| PubSub
+    Sweep -->|"TTL expiry"| Mongo
+    Sweep -->|"bit-flip"| PubSub
+    PubSub -->|"flip local bit"| App
 ```
 
 ## 1. Search & Indexing Strategy
